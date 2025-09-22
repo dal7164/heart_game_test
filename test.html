@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>하트잡기 게임</title>
+  <style>
+    :root{--bg:#f0f8ff}
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Arial;background:var(--bg);display:flex;align-items:center;justify-content:center}
+    .wrap{width:100%;max-width:900px;padding:16px;box-sizing:border-box}
+    canvas{display:block;width:100%;height:auto;background:linear-gradient(#cde, #eef);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.12)}
+    .hud{display:flex;gap:12px;align-items:center;justify-content:space-between;margin:10px 0;flex-wrap:wrap}
+    .panel{display:flex;gap:10px;align-items:center}
+    button{background:#ff6b6b;border:none;padding:8px 12px;border-radius:8px;color:white;font-weight:600;cursor:pointer}
+    .info{font-size:16px;display:flex;align-items:center;gap:6px}
+    .heart-icon{color:#e53935;font-size:18px}
+    .controls{display:flex;gap:8px}
+    .touch-controls{display:none}
+    @media (max-width:600px){.touch-controls{display:flex}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hud">
+    <div class="panel">
+      <div class="info">점수: <span id="score">0</span></div>
+      <div class="info">목숨: <span id="lives"></span></div>
+    </div>
+    <div class="panel controls">
+      <button id="startBtn">시작</button>
+      <button id="pauseBtn">일시정지</button>
+      <button id="resetBtn">리셋</button>
+    </div>
+    <div class="panel">
+      <label for="volume">🔊</label>
+      <input type="range" id="volume" min="0" max="1" step="0.05" value="1">
+    </div>
+  </div>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <div class="touch-controls" style="margin-top:10px;justify-content:center;">
+    <button id="leftTouch">◀</button>
+    <button id="rightTouch">▶</button>
+  </div>
+  <p style="margin-top:10px;color:#444">하트 : +10 보너스 : +50 폭탄 : -1 목숨</p>
+</div>
+
+<audio id="catchSound" src="https://actions.google.com/sounds/v1/cartoon/pop.ogg"></audio>
+<audio id="missSound" src="https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg"></audio>
+<audio id="bonusSound" src="https://actions.google.com/sounds/v1/explosions/explosion.ogg"></audio>
+<audio id="bombSound" src="https://actions.google.com/sounds/v1/cartoon/clang_and_wobble.ogg"></audio>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let W = canvas.width, H = canvas.height;
+
+let score = 0;
+let lives = 3;
+let running = false;
+let paused = false;
+let lastTime = 0;
+let spawnTimer = 0;
+let spawnInterval = 1500;
+let gameOver = false;
+
+// 최고 점수(localStorage)
+let highScore = parseInt(localStorage.getItem('highScore')) || 0;
+
+const catchSound = document.getElementById('catchSound');
+const missSound = document.getElementById('missSound');
+const bonusSound = document.getElementById('bonusSound');
+const bombSound = document.getElementById('bombSound');
+const volumeSlider = document.getElementById('volume');
+
+function updateVolume(){
+  const v = parseFloat(volumeSlider.value);
+  catchSound.volume = v;
+  missSound.volume = v;
+  bonusSound.volume = v;
+  bombSound.volume = v;
+}
+volumeSlider.addEventListener('input', updateVolume);
+updateVolume();
+
+const player = { x: W/2, y: H - 50, w: 120, h: 50, speed: 8, vx: 0 };
+const objects = [];
+const keys = {left:false,right:false};
+let pointerX = null;
+
+function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+
+function updateLivesDisplay(){
+  const livesEl = document.getElementById('lives');
+  livesEl.innerHTML = '';
+  for(let i=0;i<lives;i++){
+    livesEl.innerHTML += '<span class="heart-icon">❤</span>';
+  }
+}
+
+function startGame(){
+  score = 0; lives = 3; objects.length = 0; spawnInterval = 1500; running = true; paused = false; gameOver = false;
+  document.getElementById('score').textContent = score;
+  updateLivesDisplay();
+  lastTime = performance.now();
+  requestAnimationFrame(loop);
+}
+function pauseGame(){ paused = !paused; document.getElementById('pauseBtn').textContent = paused ? '계속' : '일시정지'; }
+function resetGame(){ running = false; paused = false; score = 0; lives = 3; objects.length = 0; gameOver = false; document.getElementById('score').textContent = score; updateLivesDisplay(); drawStartScreen(); }
+
+function spawnObject(){
+  const size = 18 + Math.random()*18;
+  const typeRand = Math.random();
+  let type = 'heart';
+  if(typeRand < 0.08) type = 'bonus';
+  else if(typeRand > 0.92) type = 'bomb';
+
+  objects.push({
+    type,
+    x: Math.random()*(W - size*2) + size,
+    y: -size,
+    r: size,
+    vy: 50 + Math.random()*60,
+    rotation: Math.random()*Math.PI*2
+  });
+}
+
+function update(dt){
+  if(gameOver) return;
+
+  spawnTimer += dt*1000;
+  if(spawnTimer > spawnInterval){
+    spawnTimer = 0;
+    spawnObject();
+    if(spawnInterval > 500) spawnInterval *= 0.985;
+  }
+
+  if(pointerX !== null){
+    const dir = pointerX - player.x;
+    player.vx = clamp(dir*0.08, -player.speed, player.speed);
+  } else {
+    player.vx = 0;
+    if(keys.left) player.vx = -player.speed;
+    if(keys.right) player.vx = player.speed;
+  }
+  player.x += player.vx;
+  player.x = clamp(player.x, player.w/2, W - player.w/2);
+
+  for(let i = objects.length-1;i>=0;i--){
+    const o = objects[i];
+    o.y += o.vy * dt;
+    o.rotation += 2*dt;
+
+    const dx = Math.abs(o.x - player.x);
+    const dy = Math.abs(o.y - player.y);
+    if(dx <= player.w/2 + o.r && dy <= player.h/2 + o.r){
+      if(o.y + o.r >= player.y - player.h/2){
+        if(o.type === 'heart'){
+          score += 10; catchSound.currentTime=0; catchSound.play();
+        } else if(o.type === 'bonus'){
+          score += 50; bonusSound.currentTime=0; bonusSound.play();
+        } else if(o.type === 'bomb'){
+          lives -= 1; bombSound.currentTime=0; bombSound.play();
+        }
+        objects.splice(i,1);
+        document.getElementById('score').textContent = score;
+        if(score > highScore){
+          highScore = score;
+          localStorage.setItem('highScore', highScore);
+        }
+        updateLivesDisplay();
+        continue;
+      }
+    }
+
+    if(o.y - o.r > H){
+      if(o.type === 'heart'){
+        lives -= 1; missSound.currentTime=0; missSound.play();
+      }
+      objects.splice(i,1);
+      updateLivesDisplay();
+    }
+  }
+
+  if(lives <= 0){
+    running = false;
+    gameOver = true;
+    drawGameOver();
+    return;
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.save(); ctx.globalAlpha = 0.12;
+  ctx.beginPath(); ctx.arc(W-60,60,80,0,Math.PI*2); ctx.fillStyle = '#fff176'; ctx.fill();
+  ctx.restore();
+
+  for(const o of objects){
+    if(o.type === 'heart') drawHeart(o.x,o.y,o.r,o.rotation,'#e53935');
+    if(o.type === 'bonus') drawHeart(o.x,o.y,o.r,o.rotation,'#42a5f5');
+    if(o.type === 'bomb') drawBomb(o.x,o.y,o.r,o.rotation);
+  }
+
+  drawBasket(player.x, player.y, player.w, player.h);
+}
+
+function loop(t){
+  if(!running) return;
+  if(paused){ lastTime = t; requestAnimationFrame(loop); return; }
+  const dt = (t - lastTime)/1000; lastTime = t;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function drawHeart(x,y,r,rot,color){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(rot);
+  ctx.beginPath();
+  ctx.moveTo(0, -r*0.3);
+  ctx.bezierCurveTo(r, -r*1.2, r*1.4, r*0.5, 0, r);
+  ctx.bezierCurveTo(-r*1.4, r*0.5, -r, -r*1.2, 0, -r*0.3);
+  ctx.closePath();
+  ctx.fillStyle = color; ctx.fill();
+  ctx.restore();
+}
+
+function drawBomb(x,y,r,rot){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(rot);
+  ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fillStyle='#424242'; ctx.fill();
+  ctx.beginPath(); ctx.arc(0,-r*0.6,r*0.2,0,Math.PI*2); ctx.fillStyle='#ffeb3b'; ctx.fill();
+  ctx.restore();
+}
+
+function drawBasket(x,y,w,h){
+  ctx.save(); ctx.translate(x,y);
+  ctx.beginPath();
+  ctx.ellipse(0, 0, w/2, h/1.2, 0, 0, Math.PI);
+  ctx.fillStyle = '#d2691e';
+  ctx.fill();
+  ctx.strokeStyle = '#8b4513';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.ellipse(0, -h*0.1, w/2, h/3, 0, 0, Math.PI*2);
+  ctx.fillStyle = '#a0522d';
+  ctx.fill();
+  ctx.stroke();
+
+  for(let i=-w/2+10;i<w/2;i+=20){
+    ctx.beginPath();
+    ctx.moveTo(i,0);
+    ctx.lineTo(i,h/2);
+    ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawStartScreen(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = '#2c3e50'; ctx.font = '36px Arial'; ctx.textAlign='center';
+  ctx.fillText('하트잡기 게임', W/2, H/2 - 20);
+  ctx.font='18px Arial'; 
+  ctx.fillText('하트 : +10 보너스 : +50 폭탄 : -1 목숨', W/2, H/2 + 20);
+  ctx.fillText('최고 점수: ' + highScore, W/2, H/2 + 50);
+}
+
+function drawGameOver(){
+  ctx.fillStyle = 'rgba(0,0,0,0.8)';
+  ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = '#fff';
+  ctx.font='48px Arial';
+  ctx.textAlign='center';
+  ctx.fillText('게임 오버', W/2, H/2 - 40);
+  ctx.font='24px Arial';
+  ctx.fillText('최종 점수: ' + score, W/2, H/2 + 10);
+  ctx.fillText('최고 점수: ' + highScore, W/2, H/2 + 50);
+}
+
+window.addEventListener('keydown', e=>{
+  if(e.key==='ArrowLeft') keys.left=true;
+  if(e.key==='ArrowRight') keys.right=true;
+  if(e.key===' '){ if(running) pauseGame(); }
+});
+window.addEventListener('keyup', e=>{
+  if(e.key==='ArrowLeft') keys.left=false;
+  if(e.key==='ArrowRight') keys.right=false;
+});
+
+canvas.addEventListener('mousemove', e=>{
+  const rect = canvas.getBoundingClientRect(); 
+  pointerX = (e.clientX - rect.left) * (W / rect.width); 
+});
+canvas.addEventListener('mouseleave', ()=>{ pointerX = null; });
+canvas.addEventListener('touchstart', e=>{
+  const rect = canvas.getBoundingClientRect(); 
+  const t = e.touches[0]; 
+  pointerX = (t.clientX - rect.left) * (W / rect.width); 
+  e.preventDefault(); 
+});
+canvas.addEventListener('touchmove', e=>{
+  const rect = canvas.getBoundingClientRect(); 
+  const t = e.touches[0]; 
+  pointerX = (t.clientX - rect.left) * (W / rect.width); 
+  e.preventDefault(); 
+});
+canvas.addEventListener('touchend', e=>{ pointerX = null; });
+
+document.getElementById('leftTouch').addEventListener('touchstart', e=>{ keys.left=true; e.preventDefault(); });
+document.getElementById('leftTouch').addEventListener('touchend', e=>{ keys.left=false; e.preventDefault(); });
+document.getElementById('rightTouch').addEventListener('touchstart', e=>{ keys.right=true; e.preventDefault(); });
+document.getElementById('rightTouch').addEventListener('touchend', e=>{ keys.right=false; e.preventDefault(); });
+
+document.getElementById('startBtn').addEventListener('click', ()=>{ if(!running) startGame(); else { score=0; lives=3; objects.length=0; document.getElementById('score').textContent = 0; updateLivesDisplay(); } });
+document.getElementById('pauseBtn').addEventListener('click', ()=>{ if(running) pauseGame(); });
+document.getElementById('resetBtn').addEventListener('click', ()=>{ resetGame(); });
+
+drawStartScreen(); updateLivesDisplay();
+</script>
+</body>
+</html>
